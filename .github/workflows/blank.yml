@@ -1,10 +1,10 @@
-name: PC criado pelo @alves7.pcm
+name: PC Windows Virtual
 
 on:
   workflow_dispatch:
     inputs:
       instance_number:
-        description: 'Instance Number (1-10)'
+        description: 'Instance Number'
         required: true
         default: '1'
         type: string
@@ -13,119 +13,156 @@ jobs:
   deploy-rdp:
     runs-on: windows-latest
     timeout-minutes: 360
-    
+
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
-      
-    - name: System Information
+
+    - name: Informações do Sistema
+      shell: powershell
       run: |
-        Write-Host "=== ENIGMANO RDP DEPLOYMENT ===" -ForegroundColor Green
-        Write-Host "Instance Number: ${{ github.event.inputs.instance_number }}" -ForegroundColor Yellow
+        Write-Host "=== PC WINDOWS VIRTUAL ===" -ForegroundColor Green
+        Write-Host "Instance: ${{ github.event.inputs.instance_number }}" -ForegroundColor Yellow
         Write-Host "Runner: $env:RUNNER_NAME" -ForegroundColor Yellow
-        Write-Host "Workflow: $env:GITHUB_WORKFLOW" -ForegroundColor Yellow
-        
-        Write-Host "`n=== SYSTEM SPECIFICATIONS ===" -ForegroundColor Cyan
-        Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, TotalPhysicalMemory
-        Get-WmiObject -Class Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors
-        
-    - name: Enable RDP
+
+        Write-Host "`n=== ESPECIFICAÇÕES ===" -ForegroundColor Cyan
+        Get-CimInstance Win32_OperatingSystem |
+          Select-Object Caption, OSArchitecture,
+          @{Name="RAM_GB";Expression={[math]::Round($_.TotalVisibleMemorySize / 1MB, 2)}}
+
+        Get-CimInstance Win32_Processor |
+          Select-Object Name, NumberOfCores, NumberOfLogicalProcessors
+
+    - name: Ativar Área de Trabalho Remota
+      shell: powershell
       run: |
-        Write-Host "Enabling Remote Desktop..." -ForegroundColor Green
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
+        Write-Host "Ativando RDP..." -ForegroundColor Green
+
+        Set-ItemProperty `
+          -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+          -Name "fDenyTSConnections" `
+          -Value 0
+
         Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 1
-        
-    - name: Create User Account
+
+        Set-ItemProperty `
+          -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+          -Name "UserAuthentication" `
+          -Value 1
+
+        Write-Host "RDP ativado!" -ForegroundColor Green
+
+    - name: Criar Usuário
+      shell: powershell
       run: |
-        Write-Host "Setting up user account..." -ForegroundColor Green
-        $Password = ConvertTo-SecureString "P@ssw0rd!" -AsPlainText -Force
-        Set-LocalUser -Name "runneradmin" -Password $Password
-        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "runneradmin"
-        Write-Host "Username: runneradmin" -ForegroundColor Yellow
-        Write-Host "Password: P@ssw0rd!" -ForegroundColor Yellow
-        
-    - name: Install Tailscale (Silent)
+        $Username = "pcuser"
+        $Password = ConvertTo-SecureString "PC@2026!Win" -AsPlainText -Force
+
+        $ExistingUser = Get-LocalUser `
+          -Name $Username `
+          -ErrorAction SilentlyContinue
+
+        if (-not $ExistingUser) {
+          New-LocalUser `
+            -Name $Username `
+            -Password $Password `
+            -PasswordNeverExpires `
+            -AccountNeverExpires
+        } else {
+          Set-LocalUser `
+            -Name $Username `
+            -Password $Password
+        }
+
+        Add-LocalGroupMember `
+          -Group "Remote Desktop Users" `
+          -Member $Username `
+          -ErrorAction SilentlyContinue
+
+        Write-Host "Usuário: $Username" -ForegroundColor Yellow
+        Write-Host "Senha: PC@2026!Win" -ForegroundColor Yellow
+
+    - name: Instalar Tailscale
+      shell: powershell
       run: |
-        Write-Host "Downloading Tailscale..." -ForegroundColor Green
-        $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-        $installerPath = "$env:TEMP\tailscale.msi"
-        Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-        Write-Host "Installing Tailscale silently..." -ForegroundColor Green
-        Start-Process msiexec.exe -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait
-        Remove-Item $installerPath -Force
-        Write-Host "Tailscale installed successfully!" -ForegroundColor Green
-        
-    - name: Start Tailscale
+        $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+        $installer = "$env:TEMP\tailscale.msi"
+
+        Write-Host "Baixando Tailscale..." -ForegroundColor Green
+
+        Invoke-WebRequest `
+          -Uri $url `
+          -OutFile $installer
+
+        Start-Process `
+          msiexec.exe `
+          -ArgumentList "/i `"$installer`" /quiet /norestart" `
+          -Wait
+
+        Remove-Item $installer -Force
+
+        Write-Host "Tailscale instalado!" -ForegroundColor Green
+
+    - name: Conectar Tailscale
+      shell: powershell
+      env:
+        TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       run: |
-        Write-Host "Starting Tailscale..." -ForegroundColor Green
-        & "C:\Program Files\Tailscale\tailscale.exe" up --authkey ${{ secrets.TAILSCALE_AUTH_KEY }} --hostname "enigmano-${{ github.run_id }}"
-        Start-Sleep -Seconds 15
-        
-    - name: Get Tailscale IP
+        $Tailscale = "C:\Program Files\Tailscale\tailscale.exe"
+
+        & $Tailscale up `
+          --authkey "$env:TAILSCALE_AUTH_KEY" `
+          --hostname "pc-windows-${{ github.run_id }}"
+
+        Start-Sleep -Seconds 10
+
+    - name: Obter IP
+      shell: powershell
       run: |
-        $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
-        Write-Host "Tailscale IP: $tsIP" -ForegroundColor Green
-        echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-        
-    - name: Install Google Chrome (Direct)
+        $Tailscale = "C:\Program Files\Tailscale\tailscale.exe"
+
+        $IP = (& $Tailscale ip -4).Trim()
+
+        "TAILSCALE_IP=$IP" | Out-File `
+          -FilePath $env:GITHUB_ENV `
+          -Append
+
+        Write-Host ""
+        Write-Host "==============================" -ForegroundColor Cyan
+        Write-Host "      PC WINDOWS VIRTUAL      " -ForegroundColor Cyan
+        Write-Host "==============================" -ForegroundColor Cyan
+        Write-Host "IP: $IP" -ForegroundColor Green
+        Write-Host "Usuário: pcuser" -ForegroundColor Yellow
+        Write-Host "Senha: PC@2026!Win" -ForegroundColor Yellow
+        Write-Host "==============================" -ForegroundColor Cyan
+
+    - name: Instalar Chrome
+      shell: powershell
       run: |
-        Write-Host "Downloading Google Chrome..." -ForegroundColor Green
-        $chromeUrl = "https://dl.google.com/chrome/install/latest/chrome_installer.exe"
-        $installerPath = "$env:TEMP\chrome_installer.exe"
-        Invoke-WebRequest -Uri $chromeUrl -OutFile $installerPath
-        Write-Host "Installing Google Chrome silently..." -ForegroundColor Green
-        Start-Process -FilePath $installerPath -ArgumentList "/silent /install" -Wait
-        Remove-Item $installerPath -Force
-        Write-Host "Google Chrome installed!" -ForegroundColor Green
-        
-    - name: Install 7-Zip (Direct)
+        $url = "https://dl.google.com/chrome/install/latest/chrome_installer.exe"
+        $installer = "$env:TEMP\chrome.exe"
+
+        Invoke-WebRequest `
+          -Uri $url `
+          -OutFile $installer
+
+        Start-Process `
+          -FilePath $installer `
+          -ArgumentList "/silent /install" `
+          -Wait
+
+        Remove-Item $installer -Force
+
+        Write-Host "Chrome instalado!" -ForegroundColor Green
+
+    - name: Manter PC Ativo
+      shell: powershell
       run: |
-        Write-Host "Downloading 7-Zip..." -ForegroundColor Green
-        $zipUrl = "https://www.7-zip.org/a/7z2409-x64.exe"
-        $installerPath = "$env:TEMP\7z-installer.exe"
-        Invoke-WebRequest -Uri $zipUrl -OutFile $installerPath
-        Write-Host "Installing 7-Zip silently..." -ForegroundColor Green
-        Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait
-        Remove-Item $installerPath -Force
-        Write-Host "7-Zip installed!" -ForegroundColor Green
-        
-    - name: Connection Details
-      run: |
-        Write-Host "`n=== CONNECTION DETAILS (TAILSCALE) ===" -ForegroundColor Green
-        Write-Host "╔══════════════════════════════════════╗" -ForegroundColor Cyan
-        Write-Host "║         ENIGMANO RDP ACCESS          ║" -ForegroundColor Cyan  
-        Write-Host "╠══════════════════════════════════════╣" -ForegroundColor Cyan
-        Write-Host "║ Host: $env:TAILSCALE_IP              ║" -ForegroundColor White
-        Write-Host "║ Username: runneradmin                ║" -ForegroundColor White
-        Write-Host "║ Password: P@ssw0rd!                  ║" -ForegroundColor White
-        Write-Host "╚══════════════════════════════════════╝" -ForegroundColor Cyan
-        
-        Write-Host "`nConnection Instructions:" -ForegroundColor Yellow
-        Write-Host "1. Install Tailscale on your device (phone, tablet, Mac, Linux)" -ForegroundColor White
-        Write-Host "2. Log in with the same Tailscale account" -ForegroundColor White
-        Write-Host "3. Open Remote Desktop app and enter the IP above" -ForegroundColor White
-        Write-Host "4. Use the provided credentials" -ForegroundColor White
-        
-    - name: Keep Session Alive
-      run: |
-        Write-Host "`n=== SESSION ACTIVE ===" -ForegroundColor Green
-        Write-Host "EnigMano RDP instance is now running!" -ForegroundColor Cyan
-        Write-Host "Instance will remain active for up to 6 hours." -ForegroundColor Yellow
-        Write-Host "Do not close this window to maintain the connection." -ForegroundColor Red
-        
-        $counter = 0
+        Write-Host ""
+        Write-Host "PC virtual ativo por até 6 horas." -ForegroundColor Green
+        Write-Host "IP: $env:TAILSCALE_IP" -ForegroundColor Cyan
+        Write-Host "Usuário: pcuser" -ForegroundColor Yellow
+        Write-Host "Senha: PC@2026!Win" -ForegroundColor Yellow
+
         while ($true) {
-          $counter++
-          Write-Host "Session active - Heartbeat #$counter ($(Get-Date))" -ForegroundColor Green
-          
-          $tsStatus = & "C:\Program Files\Tailscale\tailscale.exe" status
-          if ($tsStatus -match "active") {
-            Write-Host "Tailscale status: ACTIVE" -ForegroundColor Green
-          } else {
-            Write-Host "Tailscale status: ERROR - Restarting..." -ForegroundColor Red
-            & "C:\Program Files\Tailscale\tailscale.exe" up --authkey ${{ secrets.TAILSCALE_AUTH_KEY }} --hostname "enigmano-${{ github.run_id }}"
-          }
-          
+          Write-Host "PC ativo - $(Get-Date)" -ForegroundColor Green
           Start-Sleep -Seconds 60
         }
